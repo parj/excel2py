@@ -37,7 +37,9 @@ def test_max_verify_attempts_flag(tmp_xlsx):
     runner = CliRunner()
     with patch("excel2py.cli.convert") as mock_convert:
         mock_convert.return_value = "print('ok')"
-        result = runner.invoke(main, ["convert", str(tmp_xlsx), "--max-verify-attempts", "5"])
+        result = runner.invoke(
+            main, ["convert", str(tmp_xlsx), "--max-verify-attempts", "5"]
+        )
     assert result.exit_code == 0
     call_kwargs = mock_convert.call_args[1]
     assert call_kwargs.get("max_verify_attempts") == 5

@@ -22,7 +22,9 @@ class VerificationError:
     location: str
     expected: Any
     actual: Any
-    error_type: str  # "mismatch" | "missing_sheet" | "crash" | "no_output" | "shape_mismatch"
+    error_type: (
+        str  # "mismatch" | "missing_sheet" | "crash" | "no_output" | "shape_mismatch"
+    )
 
 
 @dataclass
@@ -93,13 +95,15 @@ def _compare_dataframes(
     actual = actual.reset_index(drop=True)
 
     if expected.shape != actual.shape:
-        errors.append(VerificationError(
-            sheet=sheet_name,
-            location="shape",
-            expected=str(expected.shape),
-            actual=str(actual.shape),
-            error_type="shape_mismatch",
-        ))
+        errors.append(
+            VerificationError(
+                sheet=sheet_name,
+                location="shape",
+                expected=str(expected.shape),
+                actual=str(actual.shape),
+                error_type="shape_mismatch",
+            )
+        )
         return errors
 
     rows = min(len(expected), 50)
@@ -110,25 +114,34 @@ def _compare_dataframes(
             exp_val = expected.iat[r, c]
             act_val = actual.iat[r, c]
 
-            exp_is_na = exp_val is None or (isinstance(exp_val, float) and pd.isna(exp_val))
-            act_is_na = act_val is None or (isinstance(act_val, float) and pd.isna(act_val))
+            exp_is_na = exp_val is None or (
+                isinstance(exp_val, float) and pd.isna(exp_val)
+            )
+            act_is_na = act_val is None or (
+                isinstance(act_val, float) and pd.isna(act_val)
+            )
             if exp_is_na and act_is_na:
                 continue
 
             try:
-                if abs(float(exp_val) - float(act_val)) <= abs(float(exp_val)) * 1e-5 + 1e-9:
+                if (
+                    abs(float(exp_val) - float(act_val))
+                    <= abs(float(exp_val)) * 1e-5 + 1e-9
+                ):
                     continue
             except (TypeError, ValueError):
                 if str(exp_val) == str(act_val):
                     continue
 
-            errors.append(VerificationError(
-                sheet=sheet_name,
-                location=f"row {r}, col {c}",
-                expected=exp_val,
-                actual=act_val,
-                error_type="mismatch",
-            ))
+            errors.append(
+                VerificationError(
+                    sheet=sheet_name,
+                    location=f"row {r}, col {c}",
+                    expected=exp_val,
+                    actual=act_val,
+                    error_type="mismatch",
+                )
+            )
             if len(errors) >= 20:
                 return errors
 
@@ -146,10 +159,15 @@ def compare_outputs(
     if not output_files:
         return VerificationResult(
             passed=False,
-            errors=[VerificationError(
-                sheet="", location="", expected="output files", actual="none written",
-                error_type="no_output",
-            )],
+            errors=[
+                VerificationError(
+                    sheet="",
+                    location="",
+                    expected="output files",
+                    actual="none written",
+                    error_type="no_output",
+                )
+            ],
         )
 
     errors: list[VerificationError] = []
@@ -157,10 +175,15 @@ def compare_outputs(
     for sheet_name, expected_df in ground_truth.items():
         output_file = _find_matching_file(output_files, sheet_name)
         if output_file is None:
-            errors.append(VerificationError(
-                sheet=sheet_name, location="", expected="output file", actual="not found",
-                error_type="missing_sheet",
-            ))
+            errors.append(
+                VerificationError(
+                    sheet=sheet_name,
+                    location="",
+                    expected="output file",
+                    actual="not found",
+                    error_type="missing_sheet",
+                )
+            )
             continue
 
         try:
@@ -169,10 +192,15 @@ def compare_outputs(
             else:
                 actual_df = pd.read_excel(output_file, header=None)
         except Exception as e:
-            errors.append(VerificationError(
-                sheet=sheet_name, location="", expected="readable file", actual=str(e),
-                error_type="crash",
-            ))
+            errors.append(
+                VerificationError(
+                    sheet=sheet_name,
+                    location="",
+                    expected="readable file",
+                    actual=str(e),
+                    error_type="crash",
+                )
+            )
             continue
 
         errors.extend(_compare_dataframes(expected_df, actual_df, sheet_name))
@@ -262,12 +290,19 @@ def check_properties(
                 for c in range(cols):
                     exp_val = expected_df.iat[r, c]
                     act_val = actual_df.iat[r, c]
-                    exp_na = exp_val is None or (isinstance(exp_val, float) and pd.isna(exp_val))
-                    act_na = act_val is None or (isinstance(act_val, float) and pd.isna(act_val))
+                    exp_na = exp_val is None or (
+                        isinstance(exp_val, float) and pd.isna(exp_val)
+                    )
+                    act_na = act_val is None or (
+                        isinstance(act_val, float) and pd.isna(act_val)
+                    )
                     if exp_na and act_na:
                         continue
                     try:
-                        if abs(float(exp_val) - float(act_val)) <= abs(float(exp_val)) * 1e-5 + 1e-9:
+                        if (
+                            abs(float(exp_val) - float(act_val))
+                            <= abs(float(exp_val)) * 1e-5 + 1e-9
+                        ):
                             continue
                     except (TypeError, ValueError):
                         if str(exp_val) == str(act_val):
@@ -323,17 +358,23 @@ def compute_output_diagnostics(
         col_diff = actual_df.shape[1] - expected_df.shape[1]
 
         if row_diff > 0:
-            lines.append(f"\nYour script wrote {row_diff} EXTRA ROW(S). Actual last 5 rows:")
+            lines.append(
+                f"\nYour script wrote {row_diff} EXTRA ROW(S). Actual last 5 rows:"
+            )
             lines.append(actual_df.tail(5).to_string(index=False, header=False))
             lines.append("\nExpected last 5 rows (what it should end with):")
             lines.append(expected_df.tail(5).to_string(index=False, header=False))
         elif row_diff < 0:
-            lines.append(f"\nYour script is MISSING {-row_diff} ROW(S). Expected last 5 rows:")
+            lines.append(
+                f"\nYour script is MISSING {-row_diff} ROW(S). Expected last 5 rows:"
+            )
             lines.append(expected_df.tail(5).to_string(index=False, header=False))
 
         if col_diff > 0:
             lines.append(f"\nYour script wrote {col_diff} EXTRA COLUMN(S).")
-            lines.append(f"  Actual columns beyond expected: {list(actual_df.iloc[0, expected_df.shape[1]:])}")
+            lines.append(
+                f"  Actual columns beyond expected: {list(actual_df.iloc[0, expected_df.shape[1] :])}"
+            )
         elif col_diff < 0:
             lines.append(f"\nYour script is MISSING {-col_diff} COLUMN(S).")
 
@@ -375,11 +416,15 @@ def build_correction_prompt(
 
     if environment_info:
         lines.append(f"## Runtime Environment\n{environment_info}")
-        lines.append("Use only APIs that exist in these exact versions. "
-                     "For example: pandas 2.x removed `DataFrame.applymap` — use `DataFrame.map` instead.\n")
+        lines.append(
+            "Use only APIs that exist in these exact versions. "
+            "For example: pandas 2.x removed `DataFrame.applymap` — use `DataFrame.map` instead.\n"
+        )
 
     if attempt_history:
-        lines.append("## Attempt History (do not repeat approaches that have already failed)")
+        lines.append(
+            "## Attempt History (do not repeat approaches that have already failed)"
+        )
         for h in attempt_history:
             crashed = " — CRASHED" if h["exit_code"] != 0 else ""
             lines.append(f"  Attempt {h['n']}: {h['error_count']} errors{crashed}")
@@ -406,14 +451,20 @@ def build_correction_prompt(
     if attempt_history:
         latest_diagnosis = attempt_history[-1].get("diagnosis")
         if latest_diagnosis:
-            lines.append("## Root Cause Diagnosis (from rubber duck analysis of the last attempt)")
-            lines.append("This explains WHY the current code fails — fix this root cause, not just the symptoms.")
+            lines.append(
+                "## Root Cause Diagnosis (from rubber duck analysis of the last attempt)"
+            )
+            lines.append(
+                "This explains WHY the current code fails — fix this root cause, not just the symptoms."
+            )
             lines.append(latest_diagnosis)
             lines.append("")
 
     if workbook_description:
         lines.append("## Original Excel Structure")
-        lines.append("Use this to understand the exact sheets, columns, and data the script must reproduce.")
+        lines.append(
+            "Use this to understand the exact sheets, columns, and data the script must reproduce."
+        )
         lines.append(workbook_description)
         lines.append("")
 
@@ -433,7 +484,9 @@ def build_correction_prompt(
         # Fallback: show raw errors only if no richer feedback is available
         lines.append(f"\n### Verification errors ({len(result.errors)} total)")
         for err in result.errors[:20]:
-            lines.append(f"  - [{err.error_type}] {err.sheet}: {err.expected!r} vs {err.actual!r}")
+            lines.append(
+                f"  - [{err.error_type}] {err.sheet}: {err.expected!r} vs {err.actual!r}"
+            )
 
     if judge_feedback:
         lines.append("\n### Why it is wrong (output analysis)")
@@ -444,13 +497,19 @@ def build_correction_prompt(
         lines.append(output_diagnostics)
 
     if ground_truth_samples:
-        lines.append("\n## EXACT Expected Output — your script must reproduce this precisely")
-        lines.append("(Values come from the Excel file itself with data_only=True. "
-                     "None means the cell contained a formula with no cached value.)")
+        lines.append(
+            "\n## EXACT Expected Output — your script must reproduce this precisely"
+        )
+        lines.append(
+            "(Values come from the Excel file itself with data_only=True. "
+            "None means the cell contained a formula with no cached value.)"
+        )
         for sheet_name, df in ground_truth_samples.items():
             if not isinstance(df, pd.DataFrame):
                 continue
-            lines.append(f"\n### Sheet '{sheet_name}' — MUST be exactly {df.shape[0]} rows × {df.shape[1]} columns")
+            lines.append(
+                f"\n### Sheet '{sheet_name}' — MUST be exactly {df.shape[0]} rows × {df.shape[1]} columns"
+            )
             lines.append(
                 f"If your dynamic trimming cannot produce this exact shape, use as a last resort: "
                 f"`output_df = output_df.iloc[:{df.shape[0]}, :{df.shape[1]}]`"
@@ -559,7 +618,9 @@ def build_value_mismatch_last_resort_prompt(
             continue
         if sheet_name not in error_sheets:
             continue
-        lines.append(f"## Expected first 5 rows for sheet '{sheet_name}' (must match exactly)")
+        lines.append(
+            f"## Expected first 5 rows for sheet '{sheet_name}' (must match exactly)"
+        )
         lines.append(df.head(5).to_string(index=False, header=False))
         lines.append("")
 
@@ -644,7 +705,9 @@ def build_fresh_generation_prompt(
             "You MUST start fresh — do NOT reuse the same logic as before.\n"
         )
         if diagnosed_causes:
-            lines.append("## Diagnosed root causes from prior attempts (avoid these patterns)")
+            lines.append(
+                "## Diagnosed root causes from prior attempts (avoid these patterns)"
+            )
             for cause in diagnosed_causes:
                 lines.append(f"  - {cause}")
             lines.append("")

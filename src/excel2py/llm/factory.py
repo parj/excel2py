@@ -3,10 +3,14 @@ from __future__ import annotations
 from excel2py.llm.base import BaseLLMProvider
 
 
-def create_provider(provider_name: str, api_key: str, model: str | None = None) -> BaseLLMProvider:
+def create_provider(
+    provider_name: str, api_key: str, model: str | None = None
+) -> BaseLLMProvider:
     providers = _get_providers()
     if provider_name not in providers:
-        raise ValueError(f"Unknown provider: {provider_name}. Choose from: {list(providers)}")
+        raise ValueError(
+            f"Unknown provider: {provider_name}. Choose from: {list(providers)}"
+        )
     return providers[provider_name](api_key=api_key, model=model)
 
 

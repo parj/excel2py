@@ -103,7 +103,9 @@ def test_verify_false_skips_loop(mock_create, tmp_xlsx, tmp_path):
 def test_verify_loop_calls_llm_on_failure(mock_create, tmp_xlsx, tmp_path):
     mock_provider = MagicMock()
     good_code = "import pandas as pd\nimport sys\nprint('fixed')"
-    mock_provider.generate.return_value = MagicMock(content="import pandas as pd\nprint('broken')")
+    mock_provider.generate.return_value = MagicMock(
+        content="import pandas as pd\nprint('broken')"
+    )
     mock_create.return_value = mock_provider
 
     failing_result = VerificationResult(
@@ -112,10 +114,18 @@ def test_verify_loop_calls_llm_on_failure(mock_create, tmp_xlsx, tmp_path):
     )
     passing_result = VerificationResult(passed=True)
 
-    with patch("excel2py.converter.extract_ground_truth", return_value={"Sales": MagicMock()}):
+    with patch(
+        "excel2py.converter.extract_ground_truth", return_value={"Sales": MagicMock()}
+    ):
         with patch("excel2py.converter.run_script", return_value=(0, "", "", tmp_path)):
-            with patch("excel2py.converter.compare_outputs", side_effect=[failing_result, passing_result]):
-                with patch("excel2py.converter.run_langchain_correction", return_value=good_code):
+            with patch(
+                "excel2py.converter.compare_outputs",
+                side_effect=[failing_result, passing_result],
+            ):
+                with patch(
+                    "excel2py.converter.run_langchain_correction",
+                    return_value=good_code,
+                ):
                     result = convert(
                         tmp_xlsx,
                         provider="openai",
@@ -134,7 +144,9 @@ def test_verify_loop_calls_llm_on_failure(mock_create, tmp_xlsx, tmp_path):
 @patch("excel2py.converter.create_provider")
 def test_verify_returns_best_result_after_max_attempts(mock_create, tmp_xlsx, tmp_path):
     mock_provider = MagicMock()
-    mock_provider.generate.return_value = MagicMock(content="import pandas as pd\n# attempt1")
+    mock_provider.generate.return_value = MagicMock(
+        content="import pandas as pd\n# attempt1"
+    )
     mock_create.return_value = mock_provider
 
     results = [
@@ -148,7 +160,9 @@ def test_verify_returns_best_result_after_max_attempts(mock_create, tmp_xlsx, tm
         "import pandas as pd\n# attempt3",
     ]
 
-    with patch("excel2py.converter.extract_ground_truth", return_value={"S": MagicMock()}):
+    with patch(
+        "excel2py.converter.extract_ground_truth", return_value={"S": MagicMock()}
+    ):
         with patch("excel2py.converter.run_script", return_value=(0, "", "", tmp_path)):
             with patch("excel2py.converter.compare_outputs", side_effect=results):
                 with patch(

@@ -45,9 +45,11 @@ class TestXlsxParser:
 
     def test_unsupported_file(self, tmp_path):
         from excel2py.exceptions import ExcelParseError
+
         bad_file = tmp_path / "test.xlsx"
         bad_file.write_text("not an excel file")
         parser = XlsxParser()
         import pytest
+
         with pytest.raises(ExcelParseError):
             parser.parse(bad_file)

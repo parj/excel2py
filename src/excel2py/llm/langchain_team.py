@@ -93,12 +93,16 @@ def build_model_invoke(
         from langchain_openai import ChatOpenAI
 
         lc = ChatOpenAI(
-            model=model_id, api_key=api_key, temperature=temperature,
+            model=model_id,
+            api_key=api_key,
+            temperature=temperature,
             base_url="https://openrouter.ai/api/v1",
         )
 
         def _openrouter_invoke(system: str, user: str) -> str:
-            return lc.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
+            return lc.invoke(
+                [SystemMessage(content=system), HumanMessage(content=user)]
+            ).content
 
         return _openrouter_invoke
 
@@ -109,7 +113,9 @@ def build_model_invoke(
         lc = ChatOpenAI(model=model_id, api_key=api_key, temperature=temperature)
 
         def _openai_invoke(system: str, user: str) -> str:
-            return lc.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
+            return lc.invoke(
+                [SystemMessage(content=system), HumanMessage(content=user)]
+            ).content
 
         return _openai_invoke
 
@@ -118,7 +124,9 @@ def build_model_invoke(
     )
 
 
-def build_langchain_model(provider: str, model_id: str, api_key: str, temperature: float):
+def build_langchain_model(
+    provider: str, model_id: str, api_key: str, temperature: float
+):
     """Backward-compat shim — returns build_model_invoke() result.
 
     New code should call build_model_invoke() directly.
@@ -157,7 +165,7 @@ def run_output_judge(
     if col_diff > 0:
         prompt_parts.append(
             f"\nActual has {col_diff} extra column(s). "
-            f"Extra column values in row 0: {list(actual_df.iloc[0, expected_df.shape[1]:])}"
+            f"Extra column values in row 0: {list(actual_df.iloc[0, expected_df.shape[1] :])}"
         )
 
     logger.debug("Running output judge for sheet %r", sheet_name)
@@ -193,7 +201,9 @@ def run_rubber_duck_diagnosis(
                 f"expected={e.expected!r} actual={e.actual!r}"
             )
         if len(errors) > 15:
-            error_lines.append(f"  ... and {len(errors) - 15} more errors of the same pattern")
+            error_lines.append(
+                f"  ... and {len(errors) - 15} more errors of the same pattern"
+            )
 
     parts = [
         f"## Verification errors ({len(errors)} total)",
@@ -206,8 +216,12 @@ def run_rubber_duck_diagnosis(
 
     if ground_truth_samples:
         parts.append("\n## Expected output (first 5 rows per failing sheet)")
-        parts.append("NOTE: ground truth uses dropna(how='all').dropna(axis=1, how='all')")
-        parts.append("If your actual output has extra empty rows/columns the expected does not, that is the bug.")
+        parts.append(
+            "NOTE: ground truth uses dropna(how='all').dropna(axis=1, how='all')"
+        )
+        parts.append(
+            "If your actual output has extra empty rows/columns the expected does not, that is the bug."
+        )
         for sheet_name, df in ground_truth_samples.items():
             if not isinstance(df, pd.DataFrame):
                 continue

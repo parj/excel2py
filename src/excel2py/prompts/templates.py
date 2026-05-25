@@ -8,12 +8,12 @@ from excel2py.models import CellData, WorkbookData
 _MAX_DATA_ROWS = 50
 
 # Matches cell references like A1, $A1, A$1, $A$1 — but not standalone numbers
-_CELL_REF_RE = re.compile(r'(\$?[A-Za-z]+)(\$?)(\d+)')
+_CELL_REF_RE = re.compile(r"(\$?[A-Za-z]+)(\$?)(\d+)")
 
 
 def _parse_address(address: str) -> tuple[str, int]:
     """Return (column_letters, row_number) from a cell address like 'D12'."""
-    m = re.match(r'([A-Z]+)(\d+)', address)
+    m = re.match(r"([A-Z]+)(\d+)", address)
     if m:
         return m.group(1), int(m.group(2))
     return address, 0
@@ -28,11 +28,12 @@ def _normalize_formula(formula: str, row: int) -> str:
       =B4*C5      ->  =B{r-1}*C{r+0}
       =SUM($A$1:$A$5)  ->  =SUM($A$1:$A$5)   (absolute refs unchanged)
     """
+
     def _replace(m: re.Match) -> str:
-        col = m.group(1)       # e.g. 'B' or '$B'
-        row_abs = m.group(2)   # '$' if row is absolute, else ''
+        col = m.group(1)  # e.g. 'B' or '$B'
+        row_abs = m.group(2)  # '$' if row is absolute, else ''
         ref_row = int(m.group(3))
-        if row_abs == '$':
+        if row_abs == "$":
             return m.group(0)  # absolute row — keep verbatim
         offset = ref_row - row
         sign = f"+{offset}" if offset >= 0 else str(offset)
@@ -44,10 +45,11 @@ def _normalize_formula(formula: str, row: int) -> str:
 @dataclass
 class _FormulaGroup:
     """One or more consecutive same-column cells sharing a formula pattern."""
+
     col: str
     start_row: int
     end_row: int
-    representative_formula: str   # formula of the first cell in the group
+    representative_formula: str  # formula of the first cell in the group
     representative_value: object  # cached value of the first cell
 
 
@@ -85,25 +87,29 @@ def _group_formula_cells(formula_cells: list[CellData]) -> list[_FormulaGroup]:
                 prev_row = row
             else:
                 # Flush current group
-                groups.append(_FormulaGroup(
-                    col=col,
-                    start_row=group_start_row,
-                    end_row=prev_row,
-                    representative_formula=group_start.formula or "",
-                    representative_value=group_start.value,
-                ))
+                groups.append(
+                    _FormulaGroup(
+                        col=col,
+                        start_row=group_start_row,
+                        end_row=prev_row,
+                        representative_formula=group_start.formula or "",
+                        representative_value=group_start.value,
+                    )
+                )
                 group_start = cell
                 group_start_row = row
                 prev_row = row
                 prev_norm = norm
 
-        groups.append(_FormulaGroup(
-            col=col,
-            start_row=group_start_row,
-            end_row=prev_row,
-            representative_formula=group_start.formula or "",
-            representative_value=group_start.value,
-        ))
+        groups.append(
+            _FormulaGroup(
+                col=col,
+                start_row=group_start_row,
+                end_row=prev_row,
+                representative_formula=group_start.formula or "",
+                representative_value=group_start.value,
+            )
+        )
 
     # Restore sheet order: sort by (start_row, col)
     groups.sort(key=lambda g: (g.start_row, g.col))
@@ -173,7 +179,9 @@ def serialize_workbook(workbook: WorkbookData) -> str:
 
             formula_cells = [c for c in sheet.cells if c.formula]
             formula_addresses = {c.address for c in formula_cells}
-            non_formula_cells = [c for c in sheet.cells if c.address not in formula_addresses]
+            non_formula_cells = [
+                c for c in sheet.cells if c.address not in formula_addresses
+            ]
 
             # Deduplicate fill-down formula groups so that 100 rows of =B{n}*C{n}
             # appear as a single "D2:D101" entry rather than 100 individual rows.
@@ -185,8 +193,7 @@ def serialize_workbook(workbook: WorkbookData) -> str:
 
             # Emit deduplicated formula groups first (in sheet order)
             shown_non_formula = [
-                c for c in sheet.cells
-                if c.address in included_data_addresses
+                c for c in sheet.cells if c.address in included_data_addresses
             ]
 
             # Build unified output in approximate sheet order
@@ -198,12 +205,20 @@ def serialize_workbook(workbook: WorkbookData) -> str:
             pending_group = next(group_iter, None)
 
             while pending_data is not None or pending_group is not None:
-                data_row = _parse_address(pending_data.address)[1] if pending_data else float("inf")
+                data_row = (
+                    _parse_address(pending_data.address)[1]
+                    if pending_data
+                    else float("inf")
+                )
                 group_row = pending_group.start_row if pending_group else float("inf")
 
                 if data_row <= group_row:
-                    value_str = "" if pending_data.value is None else str(pending_data.value)
-                    parts.append(f"{pending_data.address} | {value_str} | | {pending_data.data_type}")
+                    value_str = (
+                        "" if pending_data.value is None else str(pending_data.value)
+                    )
+                    parts.append(
+                        f"{pending_data.address} | {value_str} | | {pending_data.data_type}"
+                    )
                     pending_data = next(data_iter, None)
                 else:
                     g = pending_group
@@ -226,7 +241,9 @@ def serialize_workbook(workbook: WorkbookData) -> str:
                     pending_group = next(group_iter, None)
 
             total = len(sheet.cells)
-            shown_formula_count = sum(g.end_row - g.start_row + 1 for g in formula_groups)
+            shown_formula_count = sum(
+                g.end_row - g.start_row + 1 for g in formula_groups
+            )
             shown_data_count = len(included_data)
             shown = shown_formula_count + shown_data_count
             if total > shown:
@@ -240,21 +257,31 @@ def serialize_workbook(workbook: WorkbookData) -> str:
         for pt in workbook.pivot_tables:
             parts.append(f"Sheet: {pt.sheet_name}")
             parts.append(f"  Source range : {pt.source_range}")
-            parts.append(f"  Row fields   : {', '.join(pt.row_fields) if pt.row_fields else '(none)'}")
-            parts.append(f"  Column fields: {', '.join(pt.col_fields) if pt.col_fields else '(none)'}")
+            parts.append(
+                f"  Row fields   : {', '.join(pt.row_fields) if pt.row_fields else '(none)'}"
+            )
+            parts.append(
+                f"  Column fields: {', '.join(pt.col_fields) if pt.col_fields else '(none)'}"
+            )
             data_field_strs = []
             for f in pt.data_fields:
                 agg = pt.aggregation_functions.get(f, "SUM")
                 data_field_strs.append(f"{f} ({agg})")
-            parts.append(f"  Data fields  : {', '.join(data_field_strs) if data_field_strs else '(none)'}")
-            parts.append(f"  Filter fields: {', '.join(pt.filter_fields) if pt.filter_fields else '(none)'}")
+            parts.append(
+                f"  Data fields  : {', '.join(data_field_strs) if data_field_strs else '(none)'}"
+            )
+            parts.append(
+                f"  Filter fields: {', '.join(pt.filter_fields) if pt.filter_fields else '(none)'}"
+            )
             parts.append("")
 
     # Macros
     if workbook.macros:
         parts.append("=== VBA Macros ===")
         for macro in workbook.macros:
-            parts.append(f"--- Module: {macro.module_name} (type: {macro.macro_type}) ---")
+            parts.append(
+                f"--- Module: {macro.module_name} (type: {macro.macro_type}) ---"
+            )
             parts.append(macro.code)
             parts.append("")
 

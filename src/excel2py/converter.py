@@ -11,7 +11,12 @@ from excel2py.exceptions import CodeGenerationError, UnsupportedFormatError
 from excel2py.llm.agno_team import build_agno_model, run_broadcast_correction
 from excel2py.llm.base import LLMRequest
 from excel2py.llm.factory import create_provider
-from excel2py.llm.langchain_team import build_model_invoke, run_langchain_correction, run_output_judge, run_rubber_duck_diagnosis
+from excel2py.llm.langchain_team import (
+    build_model_invoke,
+    run_langchain_correction,
+    run_output_judge,
+    run_rubber_duck_diagnosis,
+)
 from excel2py.prompts.templates import get_system_prompt, serialize_workbook
 from excel2py.verifier import (  # noqa: E402
     build_fresh_generation_prompt,
@@ -33,7 +38,9 @@ PARSER_MAP = {
 def _get_parser(ext: str):
     entry = PARSER_MAP.get(ext)
     if not entry:
-        raise UnsupportedFormatError(f"Unsupported format: {ext}. Supported: {list(PARSER_MAP)}")
+        raise UnsupportedFormatError(
+            f"Unsupported format: {ext}. Supported: {list(PARSER_MAP)}"
+        )
     module_path, class_name = entry.rsplit(":", 1)
     import importlib
 
@@ -60,11 +67,11 @@ def _get_model(settings: Settings, provider: str) -> str:
 # so a script that gets the structure right (even with 60 wrong values) is a better
 # base for the next correction than a script with 3 wrong shapes.
 _ERROR_WEIGHTS: dict[str, float] = {
-    "no_output":       100_000,   # wrote nothing — blind
-    "missing_sheet":    50_000,   # sheet absent — structural
-    "shape_mismatch":   10_000,   # shape wrong — structural
-    "crash":         1_000_000,   # didn't run — worst
-    "mismatch":              1,   # value wrong — easy fix
+    "no_output": 100_000,  # wrote nothing — blind
+    "missing_sheet": 50_000,  # sheet absent — structural
+    "shape_mismatch": 10_000,  # shape wrong — structural
+    "crash": 1_000_000,  # didn't run — worst
+    "mismatch": 1,  # value wrong — easy fix
 }
 
 
@@ -77,6 +84,7 @@ def _score_result(result, exit_code: int) -> float:
 
 def _extract_required_shapes(ground_truth: dict) -> dict[str, tuple[int, int]]:
     import pandas as pd
+
     return {
         name: (int(df.shape[0]), int(df.shape[1]))
         for name, df in ground_truth.items()
@@ -88,6 +96,7 @@ def _get_env_info() -> str:
     import sys
     import pandas as pd
     import openpyxl
+
     return (
         f"Python {sys.version.split()[0]}, "
         f"pandas {pd.__version__}, "
@@ -166,7 +175,9 @@ def convert(
             raise CodeGenerationError(f"Generated code has syntax errors: {e}") from e
         return code
 
-    def _generate_fix_with_qa(correction_prompt: str, temperature: float | None = None) -> str:
+    def _generate_fix_with_qa(
+        correction_prompt: str, temperature: float | None = None
+    ) -> str:
         """Parallel correction: Fixer + QA run simultaneously, moderator produces final code.
 
         Backend is selected via EXCEL2PY_CORRECTION_BACKEND ("langchain" or "agno").
@@ -194,10 +205,11 @@ def convert(
 
     # Verification-and-correction loop
     from excel2py.llm.langchain_team import _SUPPORTED_PROVIDERS as _LC_PROVIDERS
+
     if verify:
         ground_truth = extract_ground_truth(input_file)
         best_code = code
-        best_score: float = float("inf")   # weighted; lower = better
+        best_score: float = float("inf")  # weighted; lower = better
         best_error_count: float = float("inf")  # raw count, for display only
         best_result = None
         best_exit_code = 0
@@ -288,13 +300,19 @@ def convert(
                             else None
                         )
                         import pandas as pd
+
                         diag_gt_samples = {
-                            k: v for k, v in ground_truth.items()
+                            k: v
+                            for k, v in ground_truth.items()
                             if isinstance(v, pd.DataFrame)
                             and any(e.sheet == k for e in last_result.errors)
                         }
                         diagnosis = run_rubber_duck_diagnosis(
-                            code, last_result.errors, exit_code, stderr, diag_invoke,
+                            code,
+                            last_result.errors,
+                            exit_code,
+                            stderr,
+                            diag_invoke,
                             output_diagnostics=diag_diagnostics,
                             ground_truth_samples=diag_gt_samples,
                         )
@@ -303,15 +321,19 @@ def convert(
                         logger.debug("Rubber duck diagnosis failed: %s", exc)
 
                 # Record this attempt in history before updating best
-                attempt_history.append({
-                    "n": attempt,
-                    "error_count": error_count,
-                    "score": score,
-                    "exit_code": exit_code,
-                    "errors": last_result.errors[:5],
-                    "stderr_tail": stderr.strip().splitlines()[-5:] if stderr else [],
-                    "diagnosis": diagnosis,
-                })
+                attempt_history.append(
+                    {
+                        "n": attempt,
+                        "error_count": error_count,
+                        "score": score,
+                        "exit_code": exit_code,
+                        "errors": last_result.errors[:5],
+                        "stderr_tail": stderr.strip().splitlines()[-5:]
+                        if stderr
+                        else [],
+                        "diagnosis": diagnosis,
+                    }
+                )
 
                 # Weighted best-code selection:
                 # shape/structural errors score 10 000–1 000 000× more than value errors,
@@ -344,12 +366,12 @@ def convert(
                     if provider in _LC_PROVIDERS and best_output_dir is not None:
                         import pandas as pd
                         from excel2py.verifier import _find_matching_file
+
                         judge_invoke = build_model_invoke(
                             provider, model, api_key, settings.temperature
                         )
-                        output_files = (
-                            list(best_output_dir.glob("*.csv"))
-                            + list(best_output_dir.glob("*.xlsx"))
+                        output_files = list(best_output_dir.glob("*.csv")) + list(
+                            best_output_dir.glob("*.xlsx")
                         )
                         for sheet_name, expected_df in ground_truth.items():
                             if not isinstance(expected_df, pd.DataFrame):
@@ -379,7 +401,8 @@ def convert(
                     )
 
                     gt_samples = {
-                        k: v for k, v in ground_truth.items()
+                        k: v
+                        for k, v in ground_truth.items()
                         if isinstance(v, __import__("pandas").DataFrame)
                         and any(
                             e.sheet == k
@@ -399,7 +422,9 @@ def convert(
                         ground_truth_samples=gt_samples,
                         stagnant_attempts=consecutive_stagnant,
                         property_failures=prop_failures,
-                        judge_feedback="\n\n".join(judge_parts) if judge_parts else None,
+                        judge_feedback="\n\n".join(judge_parts)
+                        if judge_parts
+                        else None,
                     )
                     logger.debug("Correction prompt:\n%s", correction[:1000])
 
@@ -414,10 +439,13 @@ def convert(
                     if consecutive_stagnant >= 1:
                         logger.info(
                             "Temperature escalated to %.1f (stagnant %d attempts)",
-                            correction_temp, consecutive_stagnant,
+                            correction_temp,
+                            consecutive_stagnant,
                         )
                     try:
-                        new_code = _generate_fix_with_qa(correction, temperature=correction_temp)
+                        new_code = _generate_fix_with_qa(
+                            correction, temperature=correction_temp
+                        )
                     except CodeGenerationError:
                         new_code = best_code
 
@@ -433,13 +461,17 @@ def convert(
                             escape_temp,
                         )
                         try:
-                            escape_code = _generate_fix_with_qa(correction, temperature=escape_temp)
+                            escape_code = _generate_fix_with_qa(
+                                correction, temperature=escape_temp
+                            )
                             escape_hash = hashlib.md5(escape_code.encode()).hexdigest()
                             if escape_hash not in seen_code_hashes:
                                 seen_code_hashes.add(escape_hash)
                                 new_code = escape_code
                             else:
-                                logger.info("Escape attempt also identical — stopping early")
+                                logger.info(
+                                    "Escape attempt also identical — stopping early"
+                                )
                                 break
                         except CodeGenerationError:
                             logger.info(
@@ -464,18 +496,23 @@ def convert(
                             for e in last_result.errors
                         )
                         semantic_loop = (
-                            bool(err_fingerprint) and err_fingerprint in seen_error_fingerprints
-                        ) or (
-                            bool(err_sig) and err_sig in seen_error_signatures
-                        )
+                            bool(err_fingerprint)
+                            and err_fingerprint in seen_error_fingerprints
+                        ) or (bool(err_sig) and err_sig in seen_error_signatures)
 
                         if semantic_loop:
                             # Approach pivot: route to error-type-specific last resort.
                             # Use high temperature (0.7) per mixed-temperature strategy sampling
                             # (arXiv 2603.02045): strategy tokens at high temp, code at low temp.
                             lr_temp = min(settings.temperature + 0.5, 0.95)
-                            primary_types = {e.error_type for e in (best_result.errors if best_result else [])}
-                            has_shape = bool(primary_types & {"shape_mismatch", "missing_sheet", "crash"})
+                            primary_types = {
+                                e.error_type
+                                for e in (best_result.errors if best_result else [])
+                            }
+                            has_shape = bool(
+                                primary_types
+                                & {"shape_mismatch", "missing_sheet", "crash"}
+                            )
                             if has_shape:
                                 logger.info(
                                     "Semantic loop: same shape error pattern — shape-targeted pivot (temp=%.2f)",
@@ -490,10 +527,15 @@ def convert(
                                     lr_temp,
                                 )
                                 lr_prompt = build_value_mismatch_last_resort_prompt(
-                                    best_code, ground_truth, best_result, _get_env_info()
+                                    best_code,
+                                    ground_truth,
+                                    best_result,
+                                    _get_env_info(),
                                 )
                             try:
-                                lr_code = _generate_fix_with_qa(lr_prompt, temperature=lr_temp)
+                                lr_code = _generate_fix_with_qa(
+                                    lr_prompt, temperature=lr_temp
+                                )
                                 lr_hash = hashlib.md5(lr_code.encode()).hexdigest()
                                 if lr_hash not in seen_code_hashes:
                                     with tempfile.NamedTemporaryFile(
@@ -506,7 +548,9 @@ def convert(
                                             lr_path, input_file, verify_timeout
                                         )
                                         if lr_exit == 0:
-                                            lr_result = compare_outputs(lr_odir, ground_truth)
+                                            lr_result = compare_outputs(
+                                                lr_odir, ground_truth
+                                            )
                                             lr_score = _score_result(lr_result, lr_exit)
                                             logger.info(
                                                 "Pivot attempt: %s (%d errors, score %.0f)",
@@ -516,7 +560,9 @@ def convert(
                                             )
                                             if lr_score < best_score:
                                                 best_score = lr_score
-                                                best_error_count = lr_result.error_count()
+                                                best_error_count = (
+                                                    lr_result.error_count()
+                                                )
                                                 best_code = lr_code
                                                 best_result = lr_result
                                                 best_exit_code = lr_exit

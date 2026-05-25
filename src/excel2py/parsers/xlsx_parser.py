@@ -12,10 +12,17 @@ from excel2py.parsers.base import BaseParser
 _logger = logging.getLogger(__name__)
 
 _SUBTOTAL_MAP = {
-    "sum": "SUM", "count": "COUNT", "average": "AVERAGE",
-    "max": "MAX", "min": "MIN", "product": "PRODUCT",
-    "countNums": "COUNT", "stdDev": "STDEV", "stdDevp": "STDEVP",
-    "var": "VAR", "varp": "VARP",
+    "sum": "SUM",
+    "count": "COUNT",
+    "average": "AVERAGE",
+    "max": "MAX",
+    "min": "MIN",
+    "product": "PRODUCT",
+    "countNums": "COUNT",
+    "stdDev": "STDEV",
+    "stdDevp": "STDEVP",
+    "var": "VAR",
+    "varp": "VARP",
 }
 
 
@@ -101,12 +108,14 @@ class XlsxParser(BaseParser):
             for row, col in sorted(all_positions):
                 formula = formulas.get((row, col))
                 value = values.get((row, col))
-                cells.append(CellData(
-                    address=_to_address(row, col),
-                    value=value,
-                    formula=formula,
-                    data_type=_determine_data_type(value, bool(formula)),
-                ))
+                cells.append(
+                    CellData(
+                        address=_to_address(row, col),
+                        value=value,
+                        formula=formula,
+                        data_type=_determine_data_type(value, bool(formula)),
+                    )
+                )
 
             if all_positions:
                 rows = [r for r, _ in all_positions]
@@ -115,28 +124,31 @@ class XlsxParser(BaseParser):
             else:
                 dimensions = ""
 
-            sheets.append(SheetData(
-                name=sheet_name,
-                cells=cells,
-                merged_ranges=[],  # xlsb_reader does not expose merged ranges
-                dimensions=dimensions,
-            ))
+            sheets.append(
+                SheetData(
+                    name=sheet_name,
+                    cells=cells,
+                    merged_ranges=[],  # xlsb_reader does not expose merged ranges
+                    dimensions=dimensions,
+                )
+            )
 
         # Pivot tables
         all_pivots = [
-            _parse_pivot(pt, pt.get("sheet", ""))
-            for pt in wb.iter_pivot_tables()
+            _parse_pivot(pt, pt.get("sheet", "")) for pt in wb.iter_pivot_tables()
         ]
 
         # VBA macros (xlsm only)
         macros: list[MacroData] = []
         if suffix == ".xlsm":
             for module_name, code in wb.iter_vba_modules().items():
-                macros.append(MacroData(
-                    module_name=module_name,
-                    code=code,
-                    macro_type="Module",
-                ))
+                macros.append(
+                    MacroData(
+                        module_name=module_name,
+                        code=code,
+                        macro_type="Module",
+                    )
+                )
 
         return WorkbookData(
             filename=filepath.name,

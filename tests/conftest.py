@@ -45,6 +45,7 @@ def tmp_xlsx_with_named_range(tmp_path):
     ws["A1"] = 100
     ws["A2"] = 200
     from openpyxl.workbook.defined_name import DefinedName
+
     dn = DefinedName("MyRange", attr_text="'Data'!$A$1:$A$2")
     wb.defined_names.add(dn)
     wb.save(filepath)

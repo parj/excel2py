@@ -34,8 +34,7 @@ class TestGroupFormulaCells:
     def test_two_different_formulas_two_groups(self):
         # Rows 2-101: =B{n}*C{n}, row 102: =SUM(D2:D101)
         cells = [
-            CellData(f"D{r}", r, f"=B{r}*C{r}", "formula")
-            for r in range(2, 102)
+            CellData(f"D{r}", r, f"=B{r}*C{r}", "formula") for r in range(2, 102)
         ] + [CellData("D102", 5050, "=SUM(D2:D101)", "formula")]
         groups = _group_formula_cells(cells)
         assert len(groups) == 2
@@ -83,10 +82,7 @@ class TestGroupFormulaCells:
 
 class TestSerializeWorkbook:
     def test_deduped_group_shows_range_address(self):
-        cells = [
-            CellData(f"D{r}", r, f"=B{r}*C{r}", "formula")
-            for r in range(2, 102)
-        ]
+        cells = [CellData(f"D{r}", r, f"=B{r}*C{r}", "formula") for r in range(2, 102)]
         wb = _make_workbook(cells)
         output = serialize_workbook(wb)
         assert "D2:D101" in output
@@ -102,8 +98,7 @@ class TestSerializeWorkbook:
 
     def test_two_groups_both_appear(self):
         cells = [
-            CellData(f"D{r}", r, f"=B{r}*C{r}", "formula")
-            for r in range(2, 102)
+            CellData(f"D{r}", r, f"=B{r}*C{r}", "formula") for r in range(2, 102)
         ] + [CellData("D102", 5050, "=SUM(D2:D101)", "formula")]
         wb = _make_workbook(cells)
         output = serialize_workbook(wb)
@@ -123,6 +118,7 @@ class TestSerializeWorkbook:
 
 def test_system_prompt_merged_cell_rule():
     from excel2py.prompts.templates import get_system_prompt
+
     prompt = get_system_prompt()
     assert "merged" in prompt.lower()
     assert "forward-fill" in prompt.lower() or "forward fill" in prompt.lower()
@@ -130,12 +126,14 @@ def test_system_prompt_merged_cell_rule():
 
 def test_system_prompt_no_dead_code_rule():
     from excel2py.prompts.templates import get_system_prompt
+
     prompt = get_system_prompt()
     assert "unused" in prompt.lower()
 
 
 def test_system_prompt_argv_rule():
     from excel2py.prompts.templates import get_system_prompt
+
     prompt = get_system_prompt()
     assert "sys.argv[1]" in prompt
 

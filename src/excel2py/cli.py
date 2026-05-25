@@ -34,12 +34,20 @@ def main():
 )
 @click.option("-m", "--model", default=None, help="Model override")
 @click.option("--api-key", default=None, help="API key (overrides env config)")
-@click.option("--dry-run", is_flag=True, help="Parse Excel and print prompt without calling LLM")
 @click.option(
-    "--no-verify", "no_verify", is_flag=True, help="Skip verification-and-correction loop"
+    "--dry-run", is_flag=True, help="Parse Excel and print prompt without calling LLM"
 )
 @click.option(
-    "--max-verify-attempts", type=int, default=None, help="Max correction attempts (default 3)"
+    "--no-verify",
+    "no_verify",
+    is_flag=True,
+    help="Skip verification-and-correction loop",
+)
+@click.option(
+    "--max-verify-attempts",
+    type=int,
+    default=None,
+    help="Max correction attempts (default 3)",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug logging")
 def convert_cmd(

@@ -4,7 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="EXCEL2PY_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_prefix="EXCEL2PY_", extra="ignore"
+    )
 
     default_provider: str = "openai"
     openai_api_key: str | None = None

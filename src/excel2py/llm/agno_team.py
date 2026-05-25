@@ -51,12 +51,15 @@ def build_agno_model(provider: str, model_id: str, api_key: str, temperature: fl
     """Return the correct Agno model adapter for the given provider."""
     if provider in ("anthropic", "agno"):
         from agno.models.anthropic import Claude
+
         return Claude(id=model_id, api_key=api_key, temperature=temperature)
     if provider == "openrouter":
         from agno.models.openrouter import OpenRouter
+
         return OpenRouter(id=model_id, api_key=api_key, temperature=temperature)
     if provider == "openai":
         from agno.models.openai import OpenAIChat
+
         return OpenAIChat(id=model_id, api_key=api_key, temperature=temperature)
     raise ValueError(
         f"Provider '{provider}' is not supported by the Agno broadcast team. "
