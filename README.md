@@ -5,7 +5,7 @@
 ![Claude](https://img.shields.io/badge/Claude-D97757?style=for-the-badge&logo=claude&logoColor=white)
 
 > [!WARNING]  
-> This has been coded using a mixture of claude (sonnet 4.5)
+> This has been coded using Claude (sonnet 4.5)
 
 # xlsb_reader
 
