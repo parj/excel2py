@@ -5,7 +5,6 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
-# Single-agent system prompt grounded in concrete failure patterns.
 _CORRECTION_SYSTEM = """\
 You are an expert Python developer fixing a script that produces incorrect output files.
 
@@ -21,10 +20,13 @@ Workflow:
    - `reset_index(axis=1)` is invalid — use `rename_axis(None, axis=1)` to clear column names
 5. Make MINIMUM targeted changes. Do not rewrite working parts of the script.
 6. Read Excel with xlsb_reader: `from xlsb_reader import XlsxWorkbook, XlsbWorkbook, col_to_letter`.
-   iter_values() returns {(row, col): value} sparse dict, 0-based. Convert to DataFrame:
-   build a dense array then df.dropna(how='all').dropna(axis=1, how='all').
-7. Common causes of extra rows: not calling dropna(how='all') on output DataFrames.
-8. Common causes of extra columns: writing index (use index=False), not calling dropna(axis=1, how='all').
+   iter_values() returns {(row, col): value} sparse dict, 0-based.
+   Use the mandatory _build_sheet_df helper from the system prompt for ALL DataFrame construction.
+7. OUTPUT CONTRACT (the verifier reads your CSVs with header=None — fix these or shape mismatches occur):
+   - df.to_csv(path, index=False, header=False) — BOTH flags required, no exceptions
+   - df.dropna(how='all').dropna(axis=1, how='all') — BOTH calls required before writing
+   - Use `if v is not None:` not `if v:` in sparse-dict loops ('' is falsy, gets dropped)
+   - After building each DataFrame: df.fillna('') to convert NaN → empty string
 
 Return ONLY valid Python code — no markdown fences, no explanations."""
 
@@ -52,10 +54,8 @@ Structure your response as:
 
 Be concrete about runtime behaviour. If you are uncertain about an API's behaviour, say so."""
 
-# Providers that have a direct SDK invoke path (no LangChain required).
-_DIRECT_SDK_PROVIDERS = ("anthropic", "agno")
-# All providers supported by this module.
-_SUPPORTED_PROVIDERS = ("anthropic", "agno", "openai", "openrouter")
+# All providers are now supported uniformly via LangChain.
+_SUPPORTED_PROVIDERS = ("anthropic", "agno", "openai", "openrouter", "google")
 
 InvokeFn = Callable[[str, str], str]  # (system_prompt, user_prompt) -> response_text
 
@@ -65,72 +65,30 @@ def build_model_invoke(
     model_id: str,
     api_key: str,
     temperature: float,
+    lm=None,
 ) -> InvokeFn:
-    """Return a (system, user) -> text callable for the given provider.
+    """Return a (system, user) -> text callable backed by a LangChain chat model.
 
-    Uses the Anthropic SDK directly for anthropic/agno — no LangChain dependency.
-    Falls back to LangChain for openai/openrouter.
+    Pass an existing BaseChatModel via `lm` to reuse the same HTTP client (and its
+    connection pool) rather than instantiating a fresh one. When `lm` is None the
+    function falls back to creating a new model, which is useful when a different
+    temperature is needed for correction attempts.
     """
-    if provider in _DIRECT_SDK_PROVIDERS:
-        import anthropic as _anthropic
+    from langchain_core.messages import HumanMessage, SystemMessage
 
-        client = _anthropic.Anthropic(api_key=api_key)
+    if lm is None:
+        from excel2py.llm.factory import create_chat_model
+        lm = create_chat_model(provider, api_key, model_id, temperature)
 
-        def _anthropic_invoke(system: str, user: str) -> str:
-            response = client.messages.create(
-                model=model_id,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-                max_tokens=8192,
-                temperature=temperature,
-            )
-            return response.content[0].text
+    def _invoke(system: str, user: str) -> str:
+        response = lm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+        return response.content
 
-        return _anthropic_invoke
-
-    if provider == "openrouter":
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from langchain_openai import ChatOpenAI
-
-        lc = ChatOpenAI(
-            model=model_id,
-            api_key=api_key,
-            temperature=temperature,
-            base_url="https://openrouter.ai/api/v1",
-        )
-
-        def _openrouter_invoke(system: str, user: str) -> str:
-            return lc.invoke(
-                [SystemMessage(content=system), HumanMessage(content=user)]
-            ).content
-
-        return _openrouter_invoke
-
-    if provider == "openai":
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from langchain_openai import ChatOpenAI
-
-        lc = ChatOpenAI(model=model_id, api_key=api_key, temperature=temperature)
-
-        def _openai_invoke(system: str, user: str) -> str:
-            return lc.invoke(
-                [SystemMessage(content=system), HumanMessage(content=user)]
-            ).content
-
-        return _openai_invoke
-
-    raise ValueError(
-        f"Provider '{provider}' is not supported. Supported: {list(_SUPPORTED_PROVIDERS)}"
-    )
+    return _invoke
 
 
-def build_langchain_model(
-    provider: str, model_id: str, api_key: str, temperature: float
-):
-    """Backward-compat shim — returns build_model_invoke() result.
-
-    New code should call build_model_invoke() directly.
-    """
+def build_langchain_model(provider: str, model_id: str, api_key: str, temperature: float):
+    """Backward-compat shim — returns build_model_invoke() result."""
     return build_model_invoke(provider, model_id, api_key, temperature)
 
 
@@ -165,7 +123,7 @@ def run_output_judge(
     if col_diff > 0:
         prompt_parts.append(
             f"\nActual has {col_diff} extra column(s). "
-            f"Extra column values in row 0: {list(actual_df.iloc[0, expected_df.shape[1] :])}"
+            f"Extra column values in row 0: {list(actual_df.iloc[0, expected_df.shape[1]:])}"
         )
 
     logger.debug("Running output judge for sheet %r", sheet_name)
@@ -201,9 +159,7 @@ def run_rubber_duck_diagnosis(
                 f"expected={e.expected!r} actual={e.actual!r}"
             )
         if len(errors) > 15:
-            error_lines.append(
-                f"  ... and {len(errors) - 15} more errors of the same pattern"
-            )
+            error_lines.append(f"  ... and {len(errors) - 15} more errors of the same pattern")
 
     parts = [
         f"## Verification errors ({len(errors)} total)",
@@ -216,9 +172,7 @@ def run_rubber_duck_diagnosis(
 
     if ground_truth_samples:
         parts.append("\n## Expected output (first 5 rows per failing sheet)")
-        parts.append(
-            "NOTE: ground truth uses dropna(how='all').dropna(axis=1, how='all')"
-        )
+        parts.append("NOTE: ground truth uses dropna(how='all').dropna(axis=1, how='all')")
         parts.append(
             "If your actual output has extra empty rows/columns the expected does not, that is the bug."
         )

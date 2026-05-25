@@ -2,109 +2,101 @@ from __future__ import annotations
 
 import logging
 
-from agno.agent import Agent
-from agno.team.mode import TeamMode
-from agno.team.team import Team
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 
 logger = logging.getLogger(__name__)
 
-_FIXER_INSTRUCTIONS = [
-    "You are an expert Python developer fixing a script that produced incorrect outputs.",
-    "Analyse the root cause of every reported verification error step by step.",
-    "Then propose a complete corrected Python script.",
-    "Structure your response EXACTLY as:",
-    "## Analysis",
-    "<step-by-step reasoning about what caused each error and how the fix addresses it>",
-    "## Fixed Code",
-    "```python",
-    "<corrected Python code>",
-    "```",
-]
+_FIXER_INSTRUCTIONS = """\
+You are an expert Python developer fixing a script that produced incorrect outputs.
+Analyse the root cause of every reported verification error step by step.
+Then propose a complete corrected Python script.
+Structure your response EXACTLY as:
+## Analysis
+<step-by-step reasoning about what caused each error and how the fix addresses it>
+## Fixed Code
+```python
+<corrected Python code>
+```"""
 
-_QA_INSTRUCTIONS = [
-    "You are a critical QA engineer reviewing a Python script that produced verification errors.",
-    "For every reported error, specify EXACTLY:",
-    "1. What the code currently produces (the actual value)",
-    "2. What it must produce to pass (the expected value)",
-    "3. The precise logic change required to achieve it",
-    "Do NOT write or propose code. Focus only on precise, unambiguous requirements.",
-    "Be specific about formulas, data transformations, output column order, and shapes.",
-]
+_QA_INSTRUCTIONS = """\
+You are a critical QA skeptic reviewing a proposed code fix.
+You receive: (a) the original verification errors and (b) the Fixer's proposed code.
+Your task: identify any remaining bugs in the PROPOSED CODE that will still cause verification failures.
+Focus on:
+1. Shape errors — does the proposed code produce the exact required number of rows and columns?
+   - Is to_csv() called with BOTH index=False AND header=False? A missing header=False adds an extra row.
+   - Is dropna(how='all') applied before writing? Missing it leaves empty rows.
+   - Is dropna(axis=1, how='all') applied? Missing it leaves empty columns.
+2. Type errors — NaN vs empty string (''), float vs int, etc.
+3. Off-by-one errors in row/column slicing or grid construction.
+4. Any remaining logical errors the Fixer missed.
 
-_MODERATOR_INSTRUCTIONS = [
-    "You are a senior software engineer leading a code correction review.",
-    "You receive two inputs from your team members:",
-    "  - From the Fixer: a root-cause analysis and a proposed Python fix",
-    "  - From QA: exact requirements every error correction must satisfy",
-    "Your job: produce ONE final corrected Python script that:",
-    "  1. Implements the Fixer's approach wherever it is correct",
-    "  2. Satisfies EVERY requirement identified by QA — no exceptions",
-    "  3. Runs without errors and produces exactly the right outputs",
-    "Return ONLY valid Python code. No markdown fences, no explanations, no comments.",
-]
+Be specific: quote the line number or code fragment in the proposed fix that is wrong and
+explain exactly what it will produce vs. what is required.
+If the fix is correct, say "FIX APPROVED" — do not invent problems.
+Do NOT rewrite code. Focus only on critique."""
 
+_MODERATOR_INSTRUCTIONS = """\
+You are a senior software engineer making the final call after a code review debate.
+You receive:
+  - The original verification errors
+  - The Fixer's proposed code (with analysis)
+  - The QA critic's review of that proposed code
 
-_SUPPORTED_PROVIDERS = ("anthropic", "agno", "openai", "openrouter")
+Your job: produce ONE final corrected Python script that:
+  1. Starts from the Fixer's proposed code as the base
+  2. Addresses EVERY valid concern raised by QA (ignore concerns marked FIX APPROVED)
+  3. Runs without errors and produces exactly the right outputs
 
-
-def build_agno_model(provider: str, model_id: str, api_key: str, temperature: float):
-    """Return the correct Agno model adapter for the given provider."""
-    if provider in ("anthropic", "agno"):
-        from agno.models.anthropic import Claude
-
-        return Claude(id=model_id, api_key=api_key, temperature=temperature)
-    if provider == "openrouter":
-        from agno.models.openrouter import OpenRouter
-
-        return OpenRouter(id=model_id, api_key=api_key, temperature=temperature)
-    if provider == "openai":
-        from agno.models.openai import OpenAIChat
-
-        return OpenAIChat(id=model_id, api_key=api_key, temperature=temperature)
-    raise ValueError(
-        f"Provider '{provider}' is not supported by the Agno broadcast team. "
-        f"Supported: {list(_SUPPORTED_PROVIDERS)}"
-    )
+Return ONLY valid Python code. No markdown fences, no explanations, no comments."""
 
 
-def run_broadcast_correction(correction_prompt: str, agno_model) -> str:
-    """Fixer + QA run in broadcast mode; team leader synthesises final code in one shot.
+def run_broadcast_correction(correction_prompt: str, lm) -> str:
+    """Sequential debate correction: Fixer proposes → QA critiques the proposal → Moderator arbitrates.
 
-    Both agents receive the same correction prompt simultaneously.  The Fixer
-    proposes a fix with analysis; QA specifies exact requirements.  The team
-    leader (moderator) combines both perspectives and returns the final code.
+    Unlike parallel broadcast (where QA sees only the error description), the QA agent here
+    sees the Fixer's actual proposed code and can point to specific remaining bugs.
+    Based on SWE-Debate pattern (arXiv:2507.23348): Supporter → Skeptic → Judge.
     """
-    fixer = Agent(
-        name="Fixer",
-        role="Python code fixer",
-        model=agno_model,
-        instructions=_FIXER_INSTRUCTIONS,
-        markdown=False,
+    parser = StrOutputParser()
+
+    fixer_chain = (
+        ChatPromptTemplate.from_messages([("system", _FIXER_INSTRUCTIONS), ("human", "{input}")])
+        | lm
+        | parser
     )
-    qa = Agent(
-        name="QA",
-        role="QA requirements analyst",
-        model=agno_model,
-        instructions=_QA_INSTRUCTIONS,
-        markdown=False,
+    qa_chain = (
+        ChatPromptTemplate.from_messages([("system", _QA_INSTRUCTIONS), ("human", "{input}")])
+        | lm
+        | parser
+    )
+    moderator_chain = (
+        ChatPromptTemplate.from_messages([
+            ("system", _MODERATOR_INSTRUCTIONS),
+            ("human", "{input}"),
+        ])
+        | lm
+        | parser
     )
 
-    team = Team(
-        name="CodeCorrectionTeam",
-        mode=TeamMode.broadcast,
-        model=agno_model,
-        members=[fixer, qa],
-        instructions=_MODERATOR_INSTRUCTIONS,
-        markdown=False,
-        show_members_responses=False,
-    )
+    logger.info("Running sequential debate correction (Fixer → QA critique → Moderator)")
 
-    logger.info("Running Agno broadcast correction team (Fixer + QA → moderator)")
-    output = team.run(correction_prompt)
-    content = (
-        output.get_content_as_string()
-        if callable(getattr(output, "get_content_as_string", None))
-        else str(output.content)
+    # Round 1: Fixer proposes a fix independently
+    fixer_output = fixer_chain.invoke({"input": correction_prompt})
+
+    # Round 2: QA critiques the Fixer's specific proposed code (not just the error description)
+    qa_input = (
+        f"## Original Verification Errors\n{correction_prompt}\n\n"
+        f"## Fixer's Proposed Fix\n{fixer_output}\n\n"
+        "Critique the proposed fix above. Is it correct? What bugs remain?"
     )
-    logger.debug("Broadcast team raw output:\n%s", content[:500])
-    return content
+    qa_output = qa_chain.invoke({"input": qa_input})
+
+    # Round 3: Moderator arbitrates and produces final code
+    mod_input = (
+        f"## Original Verification Errors\n{correction_prompt}\n\n"
+        f"## Fixer's Proposed Fix\n{fixer_output}\n\n"
+        f"## QA Critique\n{qa_output}"
+    )
+    return moderator_chain.invoke({"input": mod_input})

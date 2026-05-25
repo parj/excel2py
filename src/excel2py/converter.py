@@ -6,11 +6,12 @@ import logging
 import tempfile
 from pathlib import Path
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from excel2py.config import Settings, get_settings
 from excel2py.exceptions import CodeGenerationError, UnsupportedFormatError
-from excel2py.llm.agno_team import build_agno_model, run_broadcast_correction
-from excel2py.llm.base import LLMRequest
-from excel2py.llm.factory import create_provider
+from excel2py.llm.agno_team import run_broadcast_correction
+from excel2py.llm.factory import create_chat_model
 from excel2py.llm.langchain_team import (
     build_model_invoke,
     run_langchain_correction,
@@ -159,21 +160,27 @@ def convert(
     # Call LLM (initial generation)
     api_key = api_key or _get_api_key(settings, provider)
     model = model or _get_model(settings, provider)
-    llm = create_provider(provider, api_key, model)
+    lm = create_chat_model(provider, api_key, model, settings.temperature)
 
     def _generate(prompt: str) -> str:
-        request = LLMRequest(
-            system_prompt=system_prompt,
-            user_prompt=prompt,
-            temperature=settings.temperature,
-        )
-        response = llm.generate(request)
+        response = lm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
         code = _strip_fences(response.content.strip())
         try:
             ast.parse(code)
         except SyntaxError as e:
             raise CodeGenerationError(f"Generated code has syntax errors: {e}") from e
         return code
+
+    def _generate_at_temp(prompt: str, temperature: float) -> str:
+        """Generate initial code at a specific temperature (used for diversity escapes)."""
+        alt_lm = create_chat_model(provider, api_key, model, temperature)
+        response = alt_lm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
+        alt_code = _strip_fences(response.content.strip())
+        try:
+            ast.parse(alt_code)
+        except SyntaxError as e:
+            raise CodeGenerationError(f"Alt-temperature generation has syntax errors: {e}") from e
+        return alt_code
 
     def _generate_fix_with_qa(
         correction_prompt: str, temperature: float | None = None
@@ -186,8 +193,8 @@ def convert(
         temp = temperature if temperature is not None else settings.temperature
         backend = settings.correction_backend
         if backend == "agno":
-            agno_model = build_agno_model(provider, model, api_key, temp)
-            raw = run_broadcast_correction(correction_prompt, agno_model)
+            correction_lm = create_chat_model(provider, api_key, model, temp)
+            raw = run_broadcast_correction(correction_prompt, correction_lm)
         else:
             invoke = build_model_invoke(provider, model, api_key, temp)
             raw = run_langchain_correction(correction_prompt, invoke)
@@ -204,8 +211,6 @@ def convert(
     code = _generate(user_prompt)
 
     # Verification-and-correction loop
-    from excel2py.llm.langchain_team import _SUPPORTED_PROVIDERS as _LC_PROVIDERS
-
     if verify:
         ground_truth = extract_ground_truth(input_file)
         best_code = code
@@ -218,6 +223,8 @@ def convert(
         last_result = None
         attempt_history: list[dict] = []
         consecutive_stagnant = 0
+        _last_improvement_attempt = 0  # for plateau detection
+        _PLATEAU_WINDOW = 2  # exit if best_score unchanged for this many attempts
         # D — convergence detection
         seen_code_hashes: set[str] = {hashlib.md5(code.encode()).hexdigest()}
         seen_error_signatures: set[str] = set()
@@ -289,10 +296,10 @@ def convert(
                 # Stored in attempt_history as Reflexion-style verbal memory so subsequent
                 # correction prompts know what root causes were already identified.
                 diagnosis: str | None = None
-                if provider in _LC_PROVIDERS and not last_result.passed:
+                if not last_result.passed:
                     try:
                         diag_invoke = build_model_invoke(
-                            provider, model, api_key, settings.temperature
+                            provider, model, api_key, settings.temperature, lm=lm
                         )
                         diag_diagnostics = (
                             compute_output_diagnostics(output_dir, ground_truth)
@@ -347,10 +354,25 @@ def convert(
                     best_stderr = stderr
                     best_output_dir = output_dir
                     consecutive_stagnant = 0
+                    _last_improvement_attempt = attempt
                 else:
                     consecutive_stagnant += 1
 
                 if last_result.passed:
+                    break
+
+                # Plateau exit: if best score hasn't improved for _PLATEAU_WINDOW attempts,
+                # spending more attempts on the same dead end is wasteful — return best code.
+                if (
+                    attempt >= 3
+                    and (attempt - _last_improvement_attempt) >= _PLATEAU_WINDOW
+                    and best_score < float("inf")
+                ):
+                    logger.info(
+                        "Improvement plateau: best_score=%.0f unchanged for %d attempts — exiting with best code",
+                        best_score,
+                        attempt - _last_improvement_attempt,
+                    )
                     break
 
                 if attempt < max_verify_attempts:
@@ -363,12 +385,12 @@ def convert(
 
                     # B — LLM judge: natural-language description of what is wrong per sheet
                     judge_parts: list[str] = []
-                    if provider in _LC_PROVIDERS and best_output_dir is not None:
+                    if best_output_dir is not None:
                         import pandas as pd
                         from excel2py.verifier import _find_matching_file
 
                         judge_invoke = build_model_invoke(
-                            provider, model, api_key, settings.temperature
+                            provider, model, api_key, settings.temperature, lm=lm
                         )
                         output_files = list(best_output_dir.glob("*.csv")) + list(
                             best_output_dir.glob("*.xlsx")
@@ -410,6 +432,25 @@ def convert(
                         )
                     }
 
+                    # Collect dtype snapshot for mismatch errors to help diagnose
+                    # NaN vs empty string and other type coercion bugs.
+                    actual_state_snapshot = None
+                    if (
+                        best_output_dir is not None
+                        and best_result is not None
+                        and any(e.error_type == "mismatch" for e in best_result.errors)
+                    ):
+                        from excel2py.verifier import collect_actual_state_snapshot
+                        actual_state_snapshot = collect_actual_state_snapshot(
+                            best_output_dir, ground_truth, best_result.errors
+                        )
+
+                    # AST-based linter: deterministic anti-pattern detection.
+                    # Findings are concrete line-level bugs (not prose rules) injected
+                    # at the top of the correction prompt where the LLM sees them first.
+                    from excel2py.verifier import lint_generated_code
+                    lint_findings = lint_generated_code(best_code) or None
+
                     correction = build_correction_prompt(
                         best_code,
                         best_result,
@@ -425,6 +466,8 @@ def convert(
                         judge_feedback="\n\n".join(judge_parts)
                         if judge_parts
                         else None,
+                        actual_state_snapshot=actual_state_snapshot,
+                        lint_findings=lint_findings,
                     )
                     logger.debug("Correction prompt:\n%s", correction[:1000])
 
@@ -575,6 +618,8 @@ def convert(
 
                             # After the pivot, try fresh regeneration if attempts remain
                             # (Reflexion/LATS pattern: reset priors, inject failure context).
+                            # If candidate A is already seen, try a high-temp candidate B for
+                            # diversity (multipath decoding, arXiv:2509.07676).
                             if attempt < max_verify_attempts - 1:
                                 remaining = max_verify_attempts - attempt - 1
                                 logger.info(
@@ -588,10 +633,27 @@ def convert(
                                         attempt_history,
                                         _extract_required_shapes(ground_truth),
                                     )
-                                    code = _generate(fresh_prompt)
-                                    seen_code_hashes.add(
-                                        hashlib.md5(code.encode()).hexdigest()
-                                    )
+                                    candidate_a = _generate(fresh_prompt)
+                                    hash_a = hashlib.md5(candidate_a.encode()).hexdigest()
+                                    if hash_a in seen_code_hashes:
+                                        # A is stale — try high-temperature B for novelty
+                                        try:
+                                            candidate_b = _generate_at_temp(
+                                                fresh_prompt,
+                                                min(settings.temperature + 0.4, 0.85),
+                                            )
+                                            hash_b = hashlib.md5(candidate_b.encode()).hexdigest()
+                                            if hash_b not in seen_code_hashes:
+                                                logger.info(
+                                                    "Dual candidate: pivoted to novel candidate B (A was already seen)"
+                                                )
+                                                code = candidate_b
+                                                seen_code_hashes.add(hash_b)
+                                                continue
+                                        except CodeGenerationError:
+                                            pass
+                                    code = candidate_a
+                                    seen_code_hashes.add(hash_a)
                                     continue
                                 except CodeGenerationError:
                                     logger.info(

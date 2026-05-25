@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import logging
 import subprocess
 import sys
@@ -12,6 +13,92 @@ import pandas as pd
 from xlsb_reader import XlsbWorkbook, XlsxWorkbook
 
 logger = logging.getLogger(__name__)
+
+
+def lint_generated_code(code: str) -> list[str]:
+    """Deterministic AST-based anti-pattern detection for generated scripts.
+
+    Returns a list of findings (strings). Each finding names the line, the bad pattern,
+    and why it will cause a verification failure. An empty list means no issues found.
+    These are injected into the correction prompt as concrete, line-level feedback rather
+    than relying on the LLM to remember prose rules.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    findings: list[str] = []
+
+    class _Linter(ast.NodeVisitor):
+        def __init__(self):
+            self._in_items_loop = False  # track whether we're inside a for-loop over .items()
+
+        def visit_For(self, node: ast.For) -> None:
+            # Detect loops like: for (r, c), v in values.items():
+            prev = self._in_items_loop
+            if (
+                isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Attribute)
+                and node.iter.func.attr == "items"
+            ):
+                self._in_items_loop = True
+            self.generic_visit(node)
+            self._in_items_loop = prev
+
+        def visit_If(self, node: ast.If) -> None:
+            # Detect `if v:` / `if val:` etc. inside a sparse-dict items() loop
+            if self._in_items_loop and isinstance(node.test, ast.Name):
+                findings.append(
+                    f"Line {node.lineno}: `if {node.test.id}:` inside a sparse-dict loop — "
+                    f"empty strings are falsy and will be silently dropped. "
+                    f"Use `if {node.test.id} is not None:` instead."
+                )
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Attribute):
+                attr = node.func.attr
+
+                if attr == "to_csv":
+                    kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                    if "header" not in kwargs or not _is_false(kwargs["header"]):
+                        findings.append(
+                            f"Line {node.lineno}: to_csv() is missing header=False. "
+                            f"The verifier reads CSVs with pd.read_csv(..., header=None) — "
+                            f"a pandas header line becomes an extra data row, causing a +1 row shape mismatch."
+                        )
+                    if "index" not in kwargs or not _is_false(kwargs["index"]):
+                        findings.append(
+                            f"Line {node.lineno}: to_csv() is missing index=False. "
+                            f"The default index column will appear as an extra data column."
+                        )
+
+                elif attr == "dropna":
+                    kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                    if "how" not in kwargs:
+                        findings.append(
+                            f"Line {node.lineno}: dropna() has no how= argument — default is 'any', "
+                            f"which drops rows/columns with ANY NaN value. Use dropna(how='all') to "
+                            f"only drop all-NaN rows/columns, matching the verifier's behaviour."
+                        )
+
+                elif attr in ("read_csv", "read_excel"):
+                    kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                    if "keep_default_na" not in kwargs:
+                        findings.append(
+                            f"Line {node.lineno}: {attr}() is missing keep_default_na=False. "
+                            f"Pandas converts empty strings to NaN by default; the verifier compares "
+                            f"'' (empty string) as distinct from NaN. Add keep_default_na=False."
+                        )
+
+            self.generic_visit(node)
+
+    def _is_false(node: ast.expr) -> bool:
+        return isinstance(node, ast.Constant) and node.value is False
+
+    _Linter().visit(tree)
+    return findings
 
 _EXCEL_ERRORS = {"#REF!", "#VALUE!", "#N/A", "#NAME?", "#NUM!", "#NULL!", "#DIV/0!"}
 
@@ -87,6 +174,56 @@ def _find_matching_file(output_files: list[Path], sheet_name: str) -> Path | Non
     return None
 
 
+def collect_actual_state_snapshot(
+    output_dir: Path,
+    ground_truth: dict[str, pd.DataFrame],
+    errors: list,
+) -> str:
+    """Return dtype + head() snapshot of actual output for sheets with mismatch errors.
+
+    Helps the LLM see float64 columns (NaN) where object dtype (empty strings) is expected,
+    diagnosing nan-vs-empty and other type coercion bugs directly from the script's output.
+    """
+    output_files = list(output_dir.glob("*.csv")) + list(output_dir.glob("*.xlsx"))
+    error_sheets = {e.sheet for e in errors if e.error_type == "mismatch"}
+    if not error_sheets or not output_files:
+        return ""
+
+    lines = ["## Actual DataFrame State (dtypes from script output — use to diagnose type bugs)"]
+    lines.append(
+        "If a column shows dtype=float64 where expected dtype is object, "
+        "that column contains NaN where empty strings ('') are expected. Fix: df.fillna('')."
+    )
+    for sheet_name in sorted(error_sheets):
+        matched = _find_matching_file(output_files, sheet_name)
+        if matched is None:
+            continue
+        try:
+            actual_df = pd.read_csv(matched, header=None) if matched.suffix == ".csv" else pd.read_excel(matched, header=None)
+        except Exception:
+            continue
+        lines.append(f"\n### Sheet '{sheet_name}' — actual output")
+        lines.append(f"Shape: {actual_df.shape}")
+        lines.append(f"dtypes: {dict(enumerate(actual_df.dtypes.astype(str)))}")
+        lines.append("First 3 rows:")
+        lines.append(actual_df.head(3).to_string(index=False, header=False))
+        if sheet_name in ground_truth and isinstance(ground_truth[sheet_name], pd.DataFrame):
+            exp_df = ground_truth[sheet_name]
+            lines.append(f"Expected dtypes: {dict(enumerate(exp_df.dtypes.astype(str)))}")
+
+    return "\n".join(lines)
+
+
+def _is_blank(val: Any) -> bool:
+    """Return True if val is blank: None, empty string, NaN, or any pandas NA variant."""
+    if val is None or val == "":
+        return True
+    try:
+        return bool(pd.isna(val))
+    except (TypeError, ValueError):
+        return False
+
+
 def _compare_dataframes(
     expected: pd.DataFrame, actual: pd.DataFrame, sheet_name: str
 ) -> list[VerificationError]:
@@ -114,13 +251,7 @@ def _compare_dataframes(
             exp_val = expected.iat[r, c]
             act_val = actual.iat[r, c]
 
-            exp_is_na = exp_val is None or (
-                isinstance(exp_val, float) and pd.isna(exp_val)
-            )
-            act_is_na = act_val is None or (
-                isinstance(act_val, float) and pd.isna(act_val)
-            )
-            if exp_is_na and act_is_na:
+            if _is_blank(exp_val) and _is_blank(act_val):
                 continue
 
             try:
@@ -394,11 +525,23 @@ def build_correction_prompt(
     stagnant_attempts: int = 0,
     property_failures: list[str] | None = None,
     judge_feedback: str | None = None,
+    actual_state_snapshot: str | None = None,
+    lint_findings: list[str] | None = None,
 ) -> str:
     lines = [
         "The Python script you generated has issues. Fix it and return ONLY the corrected Python file.",
         "",
     ]
+
+    if lint_findings:
+        lines.append(
+            "## Static Analysis Findings (deterministic — these WILL cause failures)\n"
+            "The following anti-patterns were detected in your code by an AST linter. "
+            "Fix ALL of them — they are confirmed bugs, not suggestions:"
+        )
+        for finding in lint_findings:
+            lines.append(f"  - {finding}")
+        lines.append("")
 
     if stagnant_attempts >= 2:
         lines.append(
@@ -496,6 +639,10 @@ def build_correction_prompt(
         lines.append("\n### Concrete row/column diff")
         lines.append(output_diagnostics)
 
+    if actual_state_snapshot:
+        lines.append("")
+        lines.append(actual_state_snapshot)
+
     if ground_truth_samples:
         lines.append(
             "\n## EXACT Expected Output — your script must reproduce this precisely"
@@ -531,79 +678,133 @@ def build_correction_prompt(
     return "\n".join(lines)
 
 
+def _classify_mismatch_errors(errors: list) -> str:
+    """Return 'nan_vs_empty' if the majority of mismatch errors are '' vs nan, else 'merged_cell'."""
+    mismatch = [e for e in errors if e.error_type == "mismatch"]
+    if not mismatch:
+        return "merged_cell"
+    nan_empty_count = 0
+    for e in mismatch:
+        exp_is_empty = e.expected == "" or e.expected == ''
+        act_is_nan = e.actual is None or (isinstance(e.actual, float) and pd.isna(e.actual))
+        act_is_empty = e.actual == "" or e.actual == ''
+        exp_is_nan = e.expected is None or (isinstance(e.expected, float) and pd.isna(e.expected))
+        if (exp_is_empty and act_is_nan) or (act_is_empty and exp_is_nan):
+            nan_empty_count += 1
+    return "nan_vs_empty" if nan_empty_count > len(mismatch) // 2 else "merged_cell"
+
+
 def build_value_mismatch_last_resort_prompt(
     code: str,
     ground_truth: dict,
     result: "VerificationResult",
     environment_info: str | None = None,
 ) -> str:
-    """Approach-pivot prompt for persistent merged-cell NaN mismatches.
+    """Approach-pivot prompt for persistent value mismatches.
 
-    Injects a complete, tested worksheet-reading pattern that uses a dict-based
-    forward-fill lookup (identical to how the verifier reads ground truth — proven
-    correct for every openpyxl version). The LLM must replace its current approach
-    with this exact pattern.
+    Routes to one of two fixes based on error classification:
+    - 'nan_vs_empty': xlsb_reader empty-string cells vs NaN in generated code
+    - 'merged_cell': openpyxl merged-cell NaN propagation (original behaviour)
     """
-    lines = [
-        "## APPROACH PIVOT REQUIRED",
-        "",
-        "Your current merged-cell handling is not working. The same NaN mismatches "
-        "have appeared across multiple correction attempts. You MUST replace your "
-        "worksheet-reading code with the EXACT pattern below — do not modify it.",
-        "",
-        "## Why this happens",
-        "openpyxl returns `None` for every non-anchor cell in a merged range. Approaches "
-        "that mutate the worksheet (unmerge_cells, ws.cell().value = ..., ws._cells[...]) "
-        "are unreliable. The only guaranteed fix is a read-time lookup dict built BEFORE "
-        "calling ws.iter_rows() or ws.values.",
-        "",
-        "## MANDATORY replacement for your worksheet-to-DataFrame function",
-        "Replace whatever function reads a worksheet into a DataFrame with EXACTLY this:",
-        "",
-        "```python",
-        "from openpyxl.utils import get_column_letter",
-        "",
-        "def worksheet_to_dataframe(ws):",
-        "    # Step 1: build merged-cell fill map from anchor values",
-        "    merged_fill = {}",
-        "    for merged_range in ws.merged_cells.ranges:",
-        "        min_col, min_row, max_col, max_row = merged_range.bounds",
-        "        anchor_val = ws.cell(row=min_row, column=min_col).value",
-        "        for r in range(min_row, max_row + 1):",
-        "            for c in range(min_col, max_col + 1):",
-        "                if r == min_row and c == min_col:",
-        "                    continue",
-        "                merged_fill[(r, c)] = anchor_val",
-        "    # Step 2: read cells, substituting fill map for None non-anchors",
-        "    rows = []",
-        "    for ws_row in ws.iter_rows():",
-        "        row_data = []",
-        "        for cell in ws_row:",
-        "            val = cell.value",
-        "            if val is None:",
-        "                val = merged_fill.get((cell.row, cell.column))",
-        "            row_data.append(val)",
-        "        rows.append(row_data)",
-        "    if not rows:",
-        "        return pd.DataFrame()",
-        "    max_cols = max(len(r) for r in rows)",
-        "    normalized = [r + [None] * (max_cols - len(r)) for r in rows]",
-        "    return pd.DataFrame(normalized, dtype=object)",
-        "```",
-        "",
-        "Do NOT call fill_merged_cells, unmerge_cells, or modify ws in any way. "
-        "Do NOT use ws.values (it skips merged fill). Use ONLY the pattern above.",
-        "",
-    ]
+    mismatch_errors = [e for e in result.errors if e.error_type == "mismatch"]
+    error_class = _classify_mismatch_errors(result.errors)
+
+    if error_class == "nan_vs_empty":
+        lines = [
+            "## APPROACH PIVOT REQUIRED",
+            "",
+            "## ROOT CAUSE: NaN vs Empty String",
+            "",
+            "Your script produces `nan` (float) where the expected output has `''` (empty string). "
+            "xlsb_reader includes cells whose cached value is the empty string '' in its sparse dict — "
+            "they are NOT absent. If your code uses `if v:` to guard assignment, empty strings are "
+            "silently dropped and their positions become NaN in the DataFrame.",
+            "",
+            "## MANDATORY FIX — apply to every output DataFrame",
+            "",
+            "1. When building the dense grid from the sparse dict, use `if v is not None:` not `if v:`:",
+            "",
+            "```python",
+            "max_row = max(r for r, _ in values) + 1 if values else 0",
+            "max_col = max(c for _, c in values) + 1 if values else 0",
+            "data = [[None] * max_col for _ in range(max_row)]",
+            "for (r, c), v in values.items():",
+            "    if v is not None:  # keep '' — do NOT use `if v:`",
+            "        data[r][c] = v",
+            "df = pd.DataFrame(data)",
+            "df = df.dropna(how='all').dropna(axis=1, how='all')",
+            "df = df.fillna('')  # blank cells become empty string, not NaN",
+            "```",
+            "",
+            "2. If you use pd.read_excel(), pass keep_default_na=False:",
+            "```python",
+            "df = pd.read_excel(path, header=None, keep_default_na=False)",
+            "```",
+            "",
+            "Do NOT skip step 2 (df.fillna('')). This is the root cause of every mismatch below.",
+            "",
+        ]
+    else:
+        lines = [
+            "## APPROACH PIVOT REQUIRED",
+            "",
+            "Your current merged-cell handling is not working. The same NaN mismatches "
+            "have appeared across multiple correction attempts. You MUST replace your "
+            "worksheet-reading code with the EXACT pattern below — do not modify it.",
+            "",
+            "## Why this happens",
+            "openpyxl returns `None` for every non-anchor cell in a merged range. Approaches "
+            "that mutate the worksheet (unmerge_cells, ws.cell().value = ..., ws._cells[...]) "
+            "are unreliable. The only guaranteed fix is a read-time lookup dict built BEFORE "
+            "calling ws.iter_rows() or ws.values.",
+            "",
+            "## MANDATORY replacement for your worksheet-to-DataFrame function",
+            "Replace whatever function reads a worksheet into a DataFrame with EXACTLY this:",
+            "",
+            "```python",
+            "from openpyxl.utils import get_column_letter",
+            "",
+            "def worksheet_to_dataframe(ws):",
+            "    # Step 1: build merged-cell fill map from anchor values",
+            "    merged_fill = {}",
+            "    for merged_range in ws.merged_cells.ranges:",
+            "        min_col, min_row, max_col, max_row = merged_range.bounds",
+            "        anchor_val = ws.cell(row=min_row, column=min_col).value",
+            "        for r in range(min_row, max_row + 1):",
+            "            for c in range(min_col, max_col + 1):",
+            "                if r == min_row and c == min_col:",
+            "                    continue",
+            "                merged_fill[(r, c)] = anchor_val",
+            "    # Step 2: read cells, substituting fill map for None non-anchors",
+            "    rows = []",
+            "    for ws_row in ws.iter_rows():",
+            "        row_data = []",
+            "        for cell in ws_row:",
+            "            val = cell.value",
+            "            if val is None:",
+            "                val = merged_fill.get((cell.row, cell.column))",
+            "            row_data.append(val)",
+            "        rows.append(row_data)",
+            "    if not rows:",
+            "        return pd.DataFrame()",
+            "    max_cols = max(len(r) for r in rows)",
+            "    normalized = [r + [None] * (max_cols - len(r)) for r in rows]",
+            "    return pd.DataFrame(normalized, dtype=object)",
+            "```",
+            "",
+            "Do NOT call fill_merged_cells, unmerge_cells, or modify ws in any way. "
+            "Do NOT use ws.values (it skips merged fill). Use ONLY the pattern above.",
+            "",
+        ]
 
     if environment_info:
         lines.append(f"Runtime: {environment_info}\n")
 
     # Show sample mismatches so the LLM understands the scope
-    mismatch_errors = [e for e in result.errors if e.error_type == "mismatch"]
     if mismatch_errors:
+        cause_label = "nan vs empty string" if error_class == "nan_vs_empty" else "missing merged-cell fill"
         lines.append(
-            f"## Sample mismatches ({len(mismatch_errors)} total — all caused by missing merged-cell fill)"
+            f"## Sample mismatches ({len(mismatch_errors)} total — all caused by {cause_label})"
         )
         for err in mismatch_errors[:15]:
             lines.append(
